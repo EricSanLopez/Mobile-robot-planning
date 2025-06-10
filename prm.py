@@ -6,6 +6,8 @@ import pinocchio as pin
 from meshcat.transformations import translation_matrix, rotation_matrix
 from scipy.spatial.distance import cdist
 from localPlanner import LocalOptimalControlPlanner, DifferentialDriveModel
+import math
+import heapq
 
 
 class PRM_Graph:
@@ -13,9 +15,14 @@ class PRM_Graph:
         self.nodes = samples
         self.edges = list()
         self._no_edges = list()
+
+    def add_nodes(self, nodes):
+        self.nodes.extend(nodes)
+        idx = len(self.nodes)
+        return list(range(idx - len(nodes), idx))
         
-    def add_edge(self, p1, p2, collision=False):
-        if not collision:
+    def add_edge(self, p1, p2, collision_free=False):
+        if collision_free:
             self.edges.append([p1, p2])
         else:
             self._no_edges.append([p1, p2])        
@@ -29,8 +36,7 @@ class PRM_Graph:
         distances = cdist(self.nodes, [self.nodes[p]]).flatten()
         return np.argsort(distances)[1:k+1]
 
-
-    def local_path(self, p1, p2, n_intervals=30):
+    def local_path(self, p1, p2, n_intervals=10):
         p1 = self.nodes[p1]
         p2 = self.nodes[p2]
         
@@ -57,7 +63,53 @@ class PRM_Graph:
         planner.solve()
         return planner.sample() 
 
+    def _edge_weight(self, u, v):
+        # Compute Euclidean distance
+        x1, y1 = self.nodes[u]
+        x2, y2 = self.nodes[v]
+        return math.hypot(x2 - x1, y2 - y1)
+
+    def dijkstra(self, start, goal):
+        np_edges = np.array(self.edges)
+        n = len(self.nodes)
+        dist = [math.inf] * n
+        prev = [None] * n
+        dist[start] = 0
+
+        # min-heap of (distance, node)
+        heap = [(0, start)]
+
+        while heap:
+            current_dist, u = heapq.heappop(heap)
+            # If we popped a stale distance, skip
+            if current_dist > dist[u]:
+                continue
+            # Early exit if we reached the goal
+            if u == goal:
+                break
+            # Relax edges
+            edges = np_edges[np.where((np_edges == u).any(axis=1))[0]]
+            for ed in edges:
+                v = ed[0] if ed[0] != u else ed[1]
+                weight = self._edge_weight(u, v)
+                alt = current_dist + weight
+                if alt < dist[v]:
+                    dist[v] = alt
+                    prev[v] = u
+                    heapq.heappush(heap, (alt, v))
+
+        # Reconstruct path
+        path = []
+        u = goal
+        if prev[u] is not None or u == start:
+            while u is not None:
+                path.append(int(u))
+                u = prev[u]
+            path.reverse()
+        return path
+
     def show_graph(self, vis):
+        utils.erase_graph_vis(vis)
         def draw_edge_cylinder(vis, name, p1, p2, radius=0.01, color=0x0000ff):
             """Draw a cylinder between two points at z=0.5"""
             p1 = np.array([*p1, 0.01])
@@ -121,19 +173,28 @@ def sample_near_wall_full(wall_obj, xlim, ylim, robot_radius, tower_radius=0.2, 
 
     # Sample from the side with a prob proportional to the perimeter difference
     side_prob = wall_length / (wall_length + 2*np.pi*(tower_radius + robot_radius))
+    tries = 2000
 
-    if np.random.rand() < side_prob:
+    c = np.random.rand()
+
+    if c < side_prob:
         # Side sampling (parallel to long edge)
         s = np.random.uniform(-wall_length/2, wall_length/2)
 
         # Outside the wall
         offset = 0
         pos = [0,0]
+
+        wall = True
+        limits = True
         
-        while utils.is_inside_wall(offset, wall_width, robot_radius) or \
-                utils.is_outside_limits(pos, xlim, ylim, robot_radius):
+        while (wall or limits) and (tries > 0):
             offset = np.random.normal(0, std)
             pos = center + s * x_axis + offset * y_axis
+
+            wall = utils.is_inside_wall(offset, wall_width, robot_radius)
+            limits = utils.is_outside_limits(pos, xlim, ylim, robot_radius)
+            tries -= 1
     
     else:
         # End sampling (near cylinder caps)
@@ -143,8 +204,11 @@ def sample_near_wall_full(wall_obj, xlim, ylim, robot_radius, tower_radius=0.2, 
         # Outside the cylinder
         offset = [0,0]
         pos = cap_center
-        while utils.is_inside_cylinder(pos, cap_center, tower_radius, robot_radius) or \
-                utils.is_outside_limits(pos, xlim, ylim, robot_radius):
+
+        cylinder = True
+        limits = True
+        
+        while (cylinder or limits) and (tries > 0):
             offset = np.random.normal(0, std, size=2)
             
             # Ensure that the sampling is towards the "out" direction
@@ -152,8 +216,12 @@ def sample_near_wall_full(wall_obj, xlim, ylim, robot_radius, tower_radius=0.2, 
             if dot*sign < 0:
                 offset -= 2 * dot * x_axis
             pos = cap_center + offset
-        
-    return pos
+
+            cylinder = utils.is_inside_cylinder(pos, cap_center, tower_radius, robot_radius)
+            limits = utils.is_outside_limits(pos, xlim, ylim, robot_radius)
+            tries -= 1
+    
+    return pos if tries > 0 else None
     
 
 def sample_pose(xlim, ylim):
@@ -174,10 +242,14 @@ def biased_sample_pose(xlim, ylim, geom_model, robot_radius, bias_prob=0.7, std=
     # Around obstacles
     if np.random.rand() < bias_prob:
         # Weighted choice between obstacles to have proportional sampling
-        wall = np.random.choice(wall_objects, p=wall_lengths)
-        return sample_near_wall_full(wall, xlim, ylim, robot_radius, std=std)
+        sample = None
+        while sample is None:
+            wall = np.random.choice(wall_objects, p=wall_lengths)
+            sample = sample_near_wall_full(wall, xlim, ylim, robot_radius, std=std)
+        return sample
     # Random
-    return sample_pose(xlim, ylim)
+    sample = sample_pose(xlim, ylim)
+    return sample
 
 
 def get_samples(N, xlim, ylim, geom_model, robot_radius, bias_prob=0.6, std=0.2):

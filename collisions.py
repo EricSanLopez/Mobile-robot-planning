@@ -10,6 +10,7 @@ from meshcat.transformations import translation_matrix, rotation_matrix
 
 def init_obstacles(robot, geom_model, params, visualization=False, viz=None):
     """Initialize the collision objects for all obstacles and the collision pairs with all robot parts"""
+    robot_parts = len(geom_model.geometryObjects)
 
     obstacle_positions = params.obstacle_positions
     if visualization:
@@ -168,7 +169,6 @@ def init_obstacles(robot, geom_model, params, visualization=False, viz=None):
     
     # Add a collision pair: robot vs obstacle
     # We check for collision between each robot body and the environment
-    robot_parts = 2
     for i, rob in enumerate(geom_model.geometryObjects[:robot_parts]):
         for j, obs in enumerate(geom_model.geometryObjects[robot_parts:]):
             geom_model.addCollisionPair(pin.CollisionPair(i, j+robot_parts))
@@ -193,8 +193,8 @@ def is_collision_free(timesteps, model, data, geom_model, geom_data):
         pin.forwardKinematics(model, data, q)
         pin.updateGeometryPlacements(model, data, geom_model, geom_data)
         if is_in_collision(geom_model, geom_data):
-            return True
-    return False
+            return False
+    return True
 
 
 def is_collision_free_approx(timesteps, geom_model, robot_radius, cylinder_radius):

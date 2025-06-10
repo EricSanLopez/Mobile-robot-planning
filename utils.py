@@ -105,10 +105,11 @@ def show_sample_point(viewer, name, pos, color=[0, 0.6, 1.0, 1.0], radius=0.03):
     viewer[name].set_transform(T)
 
 
-def erase_sample_points(viewer):
+def erase_graph_vis(viewer):
     for i in range(10000):
         try:
-            viewer[f"sample_{i}"].delete()
+            viewer[f"nodes/{i}"].delete()
+            viewer[f"edges/{i}"].delete()
         except:
             pass
 
