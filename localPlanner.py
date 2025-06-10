@@ -33,6 +33,32 @@ class DifferentialDriveModel:
         return ca.vcat([dx, dy, dtheta])
 
 
+# ────────────────────────────────────────────────────────────────
+# ░░  Bicycle (car-like) kinematics  ░░
+# state  x = [x, y, theta, phi]
+# input  u = [v, phi_dot]
+# ────────────────────────────────────────────────────────────────
+class BicycleModel:
+    """Planar bicycle model with a fixed wheel-base L.
+    theta: heading angle 
+    phi: steering angle
+    """
+    nstate:   int = 4
+    ncontrol: int = 2
+    L:        float = 0.30   # [m]
+
+    @staticmethod
+    def dynamics(x: ca.MX | ca.SX, u: ca.MX | ca.SX) -> ca.MX:
+        px, py, th, phi = ca.vertsplit(x)
+        v,  phi_dot     = ca.vertsplit(u)
+
+        dx     = v * ca.cos(th)
+        dy     = v * ca.sin(th)
+        dtheta = v * ca.tan(phi) / BicycleModel.L
+        dphi   = phi_dot
+        return ca.vcat([dx, dy, dtheta, dphi])
+
+
 class LocalOptimalControlPlanner:
 
     def __init__(
@@ -113,7 +139,6 @@ class LocalOptimalControlPlanner:
         # ─── Obstacle avoidance ─────────────────────────────────────
         # 
         # ─── Cost function ──────────────────────────────────────────
-        # Typical choices include: ∫  ||u||² dt, ∫ 1 dt (minimum‑time), etc.
         
         ocp.add_objective(ocp.integral(ca.sumsqr(u)))
         
@@ -163,11 +188,16 @@ class LocalOptimalControlPlanner:
 
 
 if __name__ == "__main__":
+    bike = True 
     start = np.array([0.0, 0.0, 0.0])
     goal  = np.array([1.0, 1.0, np.pi / 2])
+    if bike: 
+        start = np.array([0.0, 0.0, 0.0, 0.0])
+        goal  = np.array([1.0, 1.0, np.pi / 2, np.pi / 4])
 
+    
     planner = LocalOptimalControlPlanner(
-        model = DifferentialDriveModel(),
+        model = DifferentialDriveModel() if not bike else BicycleModel(),
         t_final = 5.0,
         n_intervals = 30,
     )

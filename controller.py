@@ -1,8 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from localPlanner import LocalOptimalControlPlanner, DifferentialDriveModel
+from localPlanner import LocalOptimalControlPlanner, DifferentialDriveModel, BicycleModel
 import time 
-from utils import show_robot
 
 def wrap_angle(a):
     """Map any angle to (-pi, pi]."""
@@ -80,84 +79,180 @@ def discrete_dynamics(state, control_input, dt, model_mismatch=False):
     return np.array([x, y, theta])
 
 
-def run_tracking_test(x_ref,            # (N,3)  reference poses [x_d, y_d, theta_d]
-                      u_ref,            # (N,2)  reference controls [v_d, w_d]
-                      dt,
+# ────────────────────────────────────────────────────────────────
+#  Bicycle-model controller
+# ────────────────────────────────────────────────────────────────
+def tracking_controller_bicycle(actual_state, desired_state, desired_ctrl,
+                                gains=(1.5, 3.0, 4.0), L=0.30):
+    """
+    actual_state  : [x, y, theta, phi]
+    desired_state : [x_d, y_d, theta_d, phi_d]
+    desired_ctrl  : [v_d, phi_dot_d]
+    gains = (k1, k2, k3)
+    """
+    k1, k2, k3 = gains
+    x,  y,  th,  phi  = actual_state
+    xd, yd, thd, phid = desired_state
+    vd, phi_dot_d     = desired_ctrl
+
+    # pose error in desired frame
+    dx, dy = x - xd, y - yd
+    ex  =  np.cos(thd) * dx + np.sin(thd) * dy
+    ey  = -np.sin(thd) * dx + np.cos(thd) * dy
+    eth = (th  - thd + np.pi) % (2*np.pi) - np.pi
+    eph = (phi - phid + np.pi) % (2*np.pi) - np.pi
+
+    v_cmd     = vd * np.cos(eth) - k1 * ex
+    phi_dot_c = phi_dot_d - k2 * np.sign(vd) * ey - k3 * eph
+    return v_cmd, phi_dot_c 
+
+
+
+# ────────────────────────────────────────────────────────────────
+#  Euler propagation of the bicycle model
+# ────────────────────────────────────────────────────────────────
+def discrete_dynamics_bicycle(state, control_input, dt,
+                              model_mismatch=False, L=0.30):
+    """
+    state  = [x, y, theta, phi]
+    input  = [v, phi_dot]
+    """
+    x, y, th, phi = state
+    v, phi_dot    = control_input
+    if model_mismatch:
+        v       += np.random.normal(0, 0.05*abs(v))
+        phi_dot += np.random.normal(0, 0.05*abs(phi_dot))
+
+    x   += v * np.cos(th) * dt
+    y   += v * np.sin(th) * dt
+    th  += (v * np.tan(phi) / L) * dt
+    phi += phi_dot * dt
+    th   = np.arctan2(np.sin(th), np.cos(th))       # wrap to -pi, pi
+    return np.array([x, y, th, phi])
+
+
+
+# ────────────────────────────────────────────────────────────────
+#  1. helper – pose error for 3-state OR 4-state vectors
+# ────────────────────────────────────────────────────────────────
+def pose_error_generic(actual, desired):
+    """
+    Compute body-frame errors.  Works for
+        • diff-drive: actual=(x,y,θ) ,  desired=(x_d,y_d,θ_d)
+        • bicycle   : actual=(x,y,θ,φ), desired=(x_d,y_d,θ_d,φ_d)
+    Returns a tuple: (e_θ, e_x, e_y, [e_φ])
+    """
+    x, y, theta, *rest  = actual
+    xd, yd, thetad, *dr = desired
+
+    ex_world  = x - xd
+    ey_world  = y - yd
+    c, s      = np.cos(thetad), np.sin(thetad)
+    e_x       =  c*ex_world + s*ey_world
+    e_y       = -s*ex_world + c*ey_world
+    e_theta   = wrap_angle(theta - thetad)
+
+    if rest and dr:                         # bicycle ⇒ steering error
+        phi, phid = rest[0], dr[0]
+        e_phi = wrap_angle(phi - phid)
+        return e_theta, e_x, e_y, e_phi
+    return e_theta, e_x, e_y
+
+
+# ────────────────────────────────────────────────────────────────
+# 2. run_tracking_test  (unified)
+# ────────────────────────────────────────────────────────────────
+def run_tracking_test(x_ref, u_ref, dt,
                       gains=(2.0, 6.0, 1.0),
                       noise=True,
-                      visualize_robot=False
-                      ):
+                      is_bike=False):
     """
-    Simulate the robot with the nonlinear tracking controller and
-    return time-stamped logs of pose, controls and errors.
+    Works for both models.
+      • x_ref : (N,3) or (N,4)
+      • u_ref : (N,2)
     """
-    N               = len(x_ref)
-    # pre-allocate logs
-    x_log           = np.empty(N)
-    y_log           = np.empty(N)
-    theta_log       = np.empty(N)
-    x_e_log         = np.empty(N)
-    y_e_log         = np.empty(N)
-    theta_e_log     = np.empty(N)
-    v_cmd_log       = np.empty(N)
-    w_cmd_log       = np.empty(N)
+    # choose proper controller & dynamics --------------------------------
+    if is_bike:
+        ctrl_fun = tracking_controller_bicycle
+        dyn_fun  = discrete_dynamics_bicycle
+        state_dim = 4
+    else:
+        ctrl_fun = tracking_controller
+        dyn_fun  = discrete_dynamics
+        state_dim = 3
 
-    # --- initial state --------------------------------------------------------
-    x = x_ref[0,0] + 0.05
-    y = x_ref[0,1] + 0.05
-    theta = x_ref[0,2] + np.deg2rad(5)
-  
-    x_log[0], y_log[0], theta_log[0] = x, y, theta
-    x_e_log[0] = y_e_log[0] = theta_e_log[0] = 0.0
+    N = len(x_ref)
 
-    # --- main loop ------------------------------------------------------------
+    # ----- logs ----------------------------------------------------------
+    state_log  = np.empty((N, state_dim))
+    cmd_log    = np.empty((N-1, 2))
+    err_log    = np.empty((N, 4))   # (e_x,e_y,e_theta,e_phi)  (phi=0 for diff)
+
+    # ----- initial state -------------------------------------------------
+    x = x_ref[0].copy()
+    x[0] += 0.05                     # small offsets
+    x[1] += 0.05
+    x[2] += np.deg2rad(5)
+    state_log[0] = x
+
+    err_log[0, :3] = 0.0
+    if is_bike:
+        err_log[0, 3] = 0.0
+
+    # ----- main loop -----------------------------------------------------
     for k in range(N-1):
-        des_pose = tuple(x_ref[k])      # (x_d, y_d, theta_d)
-        des_ctrl = tuple(u_ref[k])      # (v_d, w_d)
+        des_state = x_ref[k]
+        des_ctrl  = u_ref[k]
 
-        # compute feedback command
-        v_cmd, w_cmd = tracking_controller(
-            (x, y, theta),
-            des_pose,
-            des_ctrl,
-            gains=gains
-        )
+        # feedback command
+        v_cmd, w_cmd = ctrl_fun(x, des_state, des_ctrl, gains=gains)
 
-        
-        # propagate the "true" robot
-        x, y, theta = discrete_dynamics(
-            (x, y, theta),
-            (v_cmd, w_cmd),
-            dt,
-            model_mismatch=noise
-        )
-        if visualize_robot:
-            show_robot(x, y, theta)
-            time.sleep(dt)  # simulate real-time
+        # propagate “true” robot
+        x = dyn_fun(x, (v_cmd, w_cmd), dt, model_mismatch=noise)
 
-        # log state and command
-        x_log[k+1],    y_log[k+1],    theta_log[k+1] = x, y, theta
-        v_cmd_log[k],  w_cmd_log[k] = v_cmd, w_cmd
 
-        # compute and log tracking error
-        theta_e, x_e, y_e = pose_error(
-            (x, y, theta),
-            des_pose
-        )
-        x_e_log[k+1], y_e_log[k+1], theta_e_log[k+1] = x_e, y_e, theta_e
+        # log
+        state_log[k+1] = x
+        cmd_log[k]     = (v_cmd, w_cmd)
 
-    return (x_log, y_log, theta_log,
-            x_e_log, y_e_log, theta_e_log,
-            v_cmd_log, w_cmd_log)
+        # errors
+        errs = pose_error_generic(x, des_state)
+        err_log[k+1, :len(errs)] = errs
 
+    return state_log, cmd_log, err_log
+
+
+# ────────────────────────────────────────────────────────────────
+# 3. plotting (now 4 channels if bicycle)
+# ────────────────────────────────────────────────────────────────
+def plot_errors(t_ref, err_log, is_bike=False, gains = None):
+    """
+    err_log columns: 0=e_x,1=e_y,2=e_theta,3=e_phi (if bike)
+    """
+    n_rows = 4 if is_bike else 3
+    fig, ax = plt.subplots(n_rows, 1, figsize=(7, 1.8*n_rows), sharex=True)
+
+    lbls = [r'$x_e\,[m]$', r'$y_e\,[m]$', r'$\phi_e\,[rad]$', r'$\psi_e\,[rad]$']
+    for i in range(n_rows):
+        ax[i].plot(t_ref, err_log[:, i])
+        ax[i].set_ylabel(lbls[i])
+        ax[i].grid(True)
+    ax[-1].set_xlabel('time [s]')
+    fig.suptitle(f'{"Diff Drive" if not is_bike else "Bicycle"}: Tracking errors components -- k1,k2,k3 = ({",".join(map(str,gains))})')
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__": 
+    is_bike = True
     start = np.array([0.0, 0.0, 0.0])
     goal  = np.array([2.0, 2.0, 10 * np.pi / 180])  
+    if is_bike: 
+        start = np.array([0.0, 0.0, 0.0, 0.0])
+        goal  = np.array([2.0, 2.0, 10 * np.pi / 180, 10 * np.pi / 180])  # [x, y, theta, phi]
 
     planner = LocalOptimalControlPlanner(
-        model = DifferentialDriveModel(),
+        model = DifferentialDriveModel() if not is_bike else BicycleModel(),
         t_final = 10.0,
         n_intervals = 500,
     )
@@ -167,39 +262,19 @@ if __name__ == "__main__":
     x_guess = np.outer(1 - t_lin, start) + np.outer(t_lin, goal) # (n_intervals, 3)
     planner.set_initial_guess(x_guess=x_guess.T) 
     planner.solve()
-    t_ref, x_ref, u_ref = traj = planner.sample() # references 
+    # ---- run planner (same as before) -----------------------------------
+    t_ref, X_ref, U_ref = planner.sample()   # X_ref shape (N,4) for bicycle
+    dt = t_ref[1] - t_ref[0]
 
-    dt                  = t_ref[1] - t_ref[0]
-    gains = (2.0, 2.0, 12.0)  # K1, K2, K3
-    gains = (2.0, 6.0, 1.0)  # K1, K2, K3
-    logs = run_tracking_test(x_ref, u_ref, dt,
-                            gains=gains,
-                            noise=False,
-                            visualize_robot=False
-                            )
+    # gains = (0.2, 2., 7.)
+    gains = (2.0, 6.0, 1.0) if not is_bike else (.2, 2., 4.5)
+    # ---- simulate -------------------------------------------------------
+    state_log, cmd_log, err_log = run_tracking_test(
+            X_ref, U_ref, dt,
+            gains=gains,
+            noise=False,
+            is_bike=is_bike
+    )
 
-    (x_log, y_log, theta_log,
-    x_e, y_e, theta_e,
-    v_cmd, w_cmd) = logs
-
-    # ------------------------------------------------------------------
-    # plot tracking errors
-    # ------------------------------------------------------------------
-    fig, ax = plt.subplots(3, 1, figsize=(7, 6), sharex=True)
-
-    ax[0].plot(t_ref, theta_e, label=r'$\theta_e$')
-    ax[0].set_ylabel(r'$\theta_e$ [rad]')
-    ax[0].grid()
-
-    ax[1].plot(t_ref, x_e, label=r'$x_e$')
-    ax[1].set_ylabel(r'$x_e$ [m]')
-    ax[1].grid()
-
-    ax[2].plot(t_ref, y_e, label=r'$y_e$')
-    ax[2].set_ylabel(r'$y_e$ [m]')
-    ax[2].set_xlabel('time [s]')
-    ax[2].grid()
-
-    fig.suptitle(fr'Tracking-error channels vs. time -- $K_1,K_2,K_3$ = ({gains})')
-    plt.tight_layout()
-    plt.show()
+    # ---- plot -----------------------------------------------------------
+    plot_errors(t_ref, err_log, is_bike=is_bike, gains = gains)

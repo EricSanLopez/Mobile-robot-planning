@@ -82,6 +82,47 @@ def F_est(x: np.ndarray, u: np.ndarray, dt: float) -> np.ndarray:
         [0.0, 0.0,  1.0],
     ])
 
+# ────────────────────────────────────────────────────────────────────────────────
+# Bicycle model dynamics: 
+# ────────────────────────────────────────────────────────────────────────────────
+
+# ─── bicycle truth propagation (with noisy controls) ─────────────
+def f_truth_bike(x: np.ndarray, u: np.ndarray, dt: float, *,
+            sigma_v: float, sigma_phi: float, L: float = 0.30) -> np.ndarray:
+    v_noisy   = u[0] + np.random.normal(0.0, sigma_v)
+    phi_dot_n = u[1] + np.random.normal(0.0, sigma_phi)
+    th, phi   = x[2], x[3]
+    return x + np.array([
+        v_noisy * np.cos(th) * dt,
+        v_noisy * np.sin(th) * dt,
+        v_noisy * np.tan(phi)/L * dt,
+        phi_dot_n * dt,
+    ])
+
+# ─── EKF internal model (noise-free) ─────────────────────────────
+def f_est_bike(x: np.ndarray, u: np.ndarray, dt: float, L: float = 0.30) -> np.ndarray:
+    th, phi = x[2], x[3]
+    v, phi_dot = u
+    return x + np.array([
+        v * np.cos(th) * dt,
+        v * np.sin(th) * dt,
+        v * np.tan(phi)/L * dt,
+        phi_dot * dt,
+    ])
+
+# ─── Jacobian ∂f/∂x ─────────────────────────────────────────────
+def F_est_bike(x: np.ndarray, u: np.ndarray, dt: float, L: float = 0.30) -> np.ndarray:
+    th, phi = x[2], x[3]
+    v = u[0]
+    sec2 = 1.0 / np.cos(phi)**2
+    return np.array([
+        [1.0, 0.0, -v * dt * np.sin(th),            0.0],
+        [0.0, 1.0,  v * dt * np.cos(th),            0.0],
+        [0.0, 0.0,  1.0,           v * dt * sec2 / L],
+        [0.0, 0.0,  0.0,                         1.0],
+    ])
+
+
 
 def h_gps(x: np.ndarray) -> np.ndarray:
     return x[:2]
@@ -127,6 +168,7 @@ def run_mc(
     v: float,
     w: float,
     save_plots: bool,
+    is_bike: bool = False,
 ):
     # ——— simulation constants ————————————————————————————————
     N_MC = 100
@@ -169,8 +211,9 @@ def run_mc(
     for j in range(N_MC):
         rng = np.random.default_rng(j)
         x_t = x0.copy()
-
-        ekf = EKF(x0_hat, P0, f_est, F_est, Q_from_controls(x0[2], dt, sigma_v, sigma_w))
+        f_func = f_est_bike if is_bike else f_est
+        F_func = F_est_bike if is_bike else F_est
+        ekf = EKF(x0_hat, P0, f_func, F_func, Q_from_controls(x0[2], dt, sigma_v, sigma_w))
 
         for k in range(T):
             # —— propagate ground truth (with *noisy* controls) ————————
@@ -327,6 +370,7 @@ def main():
     parser.add_argument('--vel', type=float, default=1.0, help='v mod (m/s)')
     parser.add_argument('--w', type=float, default=-1.0, help='ω mod (rad/s)')
     parser.add_argument("--save_plots", action="store_true", help="Save figures to ./plots directory")
+    parser.add_argument('--bike_L', type=float, default=0.00, help='L > 0 uses the bike model rather than diff drive')
 
 
     args = parser.parse_args()
@@ -338,6 +382,7 @@ def main():
         save_plots=args.save_plots,
         v = args.vel, 
         w = args.w,
+        is_bike = args.bike_L > 0.0,
     )
 
 
