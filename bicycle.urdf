@@ -13,7 +13,7 @@
     </inertial>
     <visual>
       <geometry><box size="0.5 0.3 0.1"/></geometry>
-      <material name="blue"><color rgba="0.3 0.3 0.7 1"/>
+      <material name="blue"><color rgba="0.3 0.3 0.7 1"/></material>
     </visual>
     <collision>
       <geometry><box size="0.5 0.3 0.1"/></geometry>
@@ -26,14 +26,14 @@
   <link name="rear_wheel">
     <visual>
       <geometry><cylinder radius="0.1" length="0.05"/></geometry>
-      <material name="black"><color rgba="0 0 0 1"/>
+      <material name="black"><color rgba="0 0 0 1"/></material>
     </visual>
   </link>
   <!-- front wheel, child of steering link (visual only) -->
   <link name="front_wheel">
     <visual>
       <geometry><cylinder radius="0.1" length="0.05"/></geometry>
-      <material name="black"><color rgba="0 0 0 1"/>
+      <material name="black"><color rgba="0 0 0 1"/></material>
     </visual>
   </link>
 

@@ -39,13 +39,13 @@ class DifferentialDriveModel:
 # input  u = [v, phi_dot]
 # ────────────────────────────────────────────────────────────────
 class BicycleModel:
-    """Planar bicycle model with a fixed wheel-base L.
+    """Planar bicycle model 
     theta: heading angle 
     phi: steering angle
     """
-    nstate:   int = 4
+    nstate:   int = 4   
     ncontrol: int = 2
-    L:        float = 0.30   # [m]
+    L:        float = 0.50   # [m]
 
     @staticmethod
     def dynamics(x: ca.MX | ca.SX, u: ca.MX | ca.SX) -> ca.MX:
@@ -136,10 +136,7 @@ class LocalOptimalControlPlanner:
             ocp.subject_to(u_min <= u)
             ocp.subject_to(u <= u_max)
 
-        # ─── Obstacle avoidance ─────────────────────────────────────
-        # 
-        # ─── Cost function ──────────────────────────────────────────
-        
+        # ─── Cost function ──────────────────────────────────────────        
         ocp.add_objective(ocp.integral(ca.sumsqr(u)))
         
 
@@ -181,9 +178,7 @@ class LocalOptimalControlPlanner:
         _, U = self._sol.sample(self.u, grid=grid)
         return t, X, U
 
-    # Convenience shorthand -------------------------------------------------
     def get_trajectory(self):
-        """Alias for ``sample()[1]`` (state trajectory)."""
         return self.sample()[1]
 
 

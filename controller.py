@@ -83,7 +83,7 @@ def discrete_dynamics(state, control_input, dt, model_mismatch=False):
 #  Bicycle-model controller
 # ────────────────────────────────────────────────────────────────
 def tracking_controller_bicycle(actual_state, desired_state, desired_ctrl,
-                                gains=(1.5, 3.0, 4.0), L=0.30):
+                                gains=(1.5, 3.0, 4.0), L=0.50):
     """
     actual_state  : [x, y, theta, phi]
     desired_state : [x_d, y_d, theta_d, phi_d]
@@ -112,7 +112,7 @@ def tracking_controller_bicycle(actual_state, desired_state, desired_ctrl,
 #  Euler propagation of the bicycle model
 # ────────────────────────────────────────────────────────────────
 def discrete_dynamics_bicycle(state, control_input, dt,
-                              model_mismatch=False, L=0.30):
+                              model_mismatch=False, L=0.50):
     """
     state  = [x, y, theta, phi]
     input  = [v, phi_dot]
@@ -193,6 +193,7 @@ def run_tracking_test(x_ref, u_ref, dt,
     x[0] += 0.05                     # small offsets
     x[1] += 0.05
     x[2] += np.deg2rad(5)
+    if is_bike: x[3] += np.deg2rad(5)
     state_log[0] = x
 
     err_log[0, :3] = 0.0
@@ -232,7 +233,7 @@ def plot_errors(t_ref, err_log, is_bike=False, gains = None):
     n_rows = 4 if is_bike else 3
     fig, ax = plt.subplots(n_rows, 1, figsize=(7, 1.8*n_rows), sharex=True)
 
-    lbls = [r'$x_e\,[m]$', r'$y_e\,[m]$', r'$\phi_e\,[rad]$', r'$\psi_e\,[rad]$']
+    lbls = [r'$\phi_e\,[rad]$', r'$x_e\,[m]$', r'$y_e\,[m]$', r'$\psi_e\,[rad]$']
     for i in range(n_rows):
         ax[i].plot(t_ref, err_log[:, i])
         ax[i].set_ylabel(lbls[i])
@@ -267,7 +268,7 @@ if __name__ == "__main__":
     dt = t_ref[1] - t_ref[0]
 
     # gains = (0.2, 2., 7.)
-    gains = (2.0, 6.0, 1.0) if not is_bike else (.2, 2., 4.5)
+    gains = (2.0, 6.0, 1.0) if not is_bike else (.2, 2., 5.0)
     # ---- simulate -------------------------------------------------------
     state_log, cmd_log, err_log = run_tracking_test(
             X_ref, U_ref, dt,

@@ -33,7 +33,7 @@ class EKF:
     def predict(self, u: np.ndarray, dt: float) -> None:
         self.x_hat = self.f_fun(self.x_hat, u, dt)
         Fk = self.F_fun(self.x_hat, u, dt)
-        self.P = Fk @ self.P @ Fk.T + self.Q
+        self.P = Fk @ self.P @ Fk.T + self.Q  
 
     # ── update ─────────────────────────────────────────────────────────────
     def update(self, z: np.ndarray, h_fun, H_fun, R: np.ndarray) -> float:
@@ -41,8 +41,10 @@ class EKF:
         Hk = H_fun(self.x_hat)
         S = Hk @ self.P @ Hk.T + R                     # innovation covariance
         K = self.P @ Hk.T @ np.linalg.inv(S)           # Kalman gain
-        self.x_hat += K @ nu                           # state update
-        self.P = (np.eye(3) - K @ Hk) @ self.P         # Joseph not required
+        self.x_hat += K @ nu 
+        I = np.eye(self.P.shape[0])
+        self.P = (I - K @ Hk) @ self.P         
+        # self.P = (I - K @ Hk) @ self.P @ (I - K @ Hk).T + K @ R @ K.T
         return float(nu.T @ np.linalg.inv(S) @ nu)     # NIS (scalar)
 
 
@@ -88,9 +90,9 @@ def F_est(x: np.ndarray, u: np.ndarray, dt: float) -> np.ndarray:
 
 # ─── bicycle truth propagation (with noisy controls) ─────────────
 def f_truth_bike(x: np.ndarray, u: np.ndarray, dt: float, *,
-            sigma_v: float, sigma_phi: float, L: float = 0.30) -> np.ndarray:
+            sigma_v: float, sigma_w: float, L: float = 0.50) -> np.ndarray:
     v_noisy   = u[0] + np.random.normal(0.0, sigma_v)
-    phi_dot_n = u[1] + np.random.normal(0.0, sigma_phi)
+    phi_dot_n = u[1] + np.random.normal(0.0, sigma_w)
     th, phi   = x[2], x[3]
     return x + np.array([
         v_noisy * np.cos(th) * dt,
@@ -100,7 +102,7 @@ def f_truth_bike(x: np.ndarray, u: np.ndarray, dt: float, *,
     ])
 
 # ─── EKF internal model (noise-free) ─────────────────────────────
-def f_est_bike(x: np.ndarray, u: np.ndarray, dt: float, L: float = 0.30) -> np.ndarray:
+def f_est_bike(x: np.ndarray, u: np.ndarray, dt: float, L: float = 0.50) -> np.ndarray:
     th, phi = x[2], x[3]
     v, phi_dot = u
     return x + np.array([
@@ -111,7 +113,7 @@ def f_est_bike(x: np.ndarray, u: np.ndarray, dt: float, L: float = 0.30) -> np.n
     ])
 
 # ─── Jacobian ∂f/∂x ─────────────────────────────────────────────
-def F_est_bike(x: np.ndarray, u: np.ndarray, dt: float, L: float = 0.30) -> np.ndarray:
+def F_est_bike(x: np.ndarray, u: np.ndarray, dt: float, L: float = 0.50) -> np.ndarray:
     th, phi = x[2], x[3]
     v = u[0]
     sec2 = 1.0 / np.cos(phi)**2
@@ -131,14 +133,26 @@ def h_gps(x: np.ndarray) -> np.ndarray:
 def H_gps(_: np.ndarray) -> np.ndarray:  # (2×3) constant Jacobian
     return np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
+def H_gps_bike(_: np.ndarray) -> np.ndarray:  # (2×4) constant Jacobian
+    return np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
 
-def Q_from_controls(theta: float, dt: float, sigma_v: float, sigma_w: float) -> np.ndarray:
+def Q_from_controls(x: np.ndarray, dt: float, sigma_v: float, sigma_w: float) -> np.ndarray:
     """First‑order propagation of control noise to state space."""
+    theta, *_ = x
     G = np.array([
         [np.cos(theta) * dt, 0.0],
         [np.sin(theta) * dt, 0.0],
         [0.0, dt],
     ])
+    return G @ np.diag([sigma_v ** 2, sigma_w ** 2]) @ G.T
+
+def Q_from_controls_bike(x: np.ndarray, dt, sigma_v, sigma_w, L=0.30): 
+    theta,phi = x
+    G = np.array([[np.cos(theta)*dt, .0],
+     [np.sin(theta)*dt, .0],
+     [np.tan(phi) / L * dt, .0],
+     [0, dt]])
+    
     return G @ np.diag([sigma_v ** 2, sigma_w ** 2]) @ G.T
 
 
@@ -184,18 +198,15 @@ def run_mc(
     gps_every = int(np.round(gps_latency / dt))
 
     # initial truth / estimate
-    x0 = np.array([0.0, 0.0, -np.deg2rad(30.0)])
-    
-    # initial uncertainty: 0.5 m in X/Y and 15 degs in theta
-    P0 = np.diag([
-        0.5**2,             
-        0.5**2,             
-        np.deg2rad(15.0)**2 
-    ])
-
-    x0_hat = np.array([0.2, -0.1, -np.deg2rad(10.0)])
-
-
+    x0 = np.array([0.0, 0.0] + [-np.deg2rad(30.0), 0.] )
+    x0_hat = np.array([0.2, -0.1] + [-np.deg2rad(10.0), 0.]) 
+    # initial uncertainty: 0.5 m in X/Y and 15 degs in angles
+    diag = [.5**2] * 2 + [np.deg2rad(15.0)**2, np.deg2rad(5)**2]
+    if not is_bike:
+        x0 = x0[:3]  
+        x0_hat = x0_hat[:3] 
+        diag = diag[:3]  # 3-state
+    P0 = np.diag(diag)
 
     # measurement noise
     R_gps = np.diag([sensor_noise_std ** 2, sensor_noise_std ** 2])
@@ -213,20 +224,23 @@ def run_mc(
         x_t = x0.copy()
         f_func = f_est_bike if is_bike else f_est
         F_func = F_est_bike if is_bike else F_est
-        ekf = EKF(x0_hat, P0, f_func, F_func, Q_from_controls(x0[2], dt, sigma_v, sigma_w))
+        f_true = f_truth_bike if is_bike else f_truth 
+        Q_func = Q_from_controls_bike if is_bike else Q_from_controls
+        ekf = EKF(x0_hat, P0, f_func, F_func, Q_func(x0[2:] if is_bike else x0[2:3], dt, sigma_v, sigma_w))
 
         for k in range(T):
             # —— propagate ground truth (with *noisy* controls) ————————
-            x_t = f_truth(x_t, u, dt, sigma_v=sigma_v, sigma_w=sigma_w)
+            x_t = f_true(x_t, u, dt, sigma_v=sigma_v, sigma_w=sigma_w)
 
             # —— EKF prediction ————————————————————————————————
-            ekf.Q = Q_from_controls(ekf.x_hat[2], dt, sigma_v, sigma_w)
+            hat = ekf.x_hat
+            ekf.Q = Q_func(hat[2:] if is_bike else hat[2:3], dt, sigma_v, sigma_w)
             ekf.predict(u, dt)
 
             # —— GPS update ——————————————————————————————————————
             if k % gps_every == 0:
                 z = h_gps(x_t) + rng.normal(0.0, sensor_noise_std, 2)
-                nis = ekf.update(z, h_gps, H_gps, R_gps)
+                nis = ekf.update(z, h_gps, H_gps_bike if is_bike else H_gps, R_gps)
                 nis_all.append(nis)
 
             # —— NEES for consistency ——————————————————————————
@@ -270,13 +284,13 @@ def run_mc(
     nis_arr = np.array(nis_all) 
     nees_arr = np.array(nees_all)
     nis_cov = (nis_arr <= chi2.ppf(0.95, df=2)).mean()
-    nes_cov = (nees_arr <= chi2.ppf(0.95, df=3)).mean()
+    nes_cov = (nees_arr <= chi2.ppf(0.95, df=3 if not is_bike else 4)).mean()
 
     print(f'NEES 95 % coverage = {100*nes_cov:.2f} %')
     print(f'NIS 95 % coverage = {100*nis_cov:.2f} %')
 
     _plot_chi(nis_arr, df=2, title="NIS", fname="nis")
-    _plot_chi(nees_arr, df=3, title="NEES", fname="nees")
+    _plot_chi(nees_arr, df=3 if not is_bike else 4, title="NEES", fname="nees")
 
 
     # —— trajectory of first run ————————————————————————————————
@@ -285,10 +299,10 @@ def run_mc(
     x_hat = np.stack(first_hat)
     P_hist = np.stack(first_P)
 
-    fig, ax = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-    labels = [r"$X$ position [m]", r"$Y$ position [m]", r"Orientation $\theta$ [rad]"]
-
-    for i in range(3):
+    max_int = 4 if is_bike else 3
+    fig, ax = plt.subplots(max_int, 1, figsize=(10, 8), sharex=True)
+    labels = [r"$X$ position [m]", r"$Y$ position [m]", r"Heading $\phi$ [rad]", r"Steering $\psi$ [rad]"]
+    for i in range(max_int):
         x_gt_ = x_gt[:, i]
         x_hat_ = x_hat[:, i]
         if i == 2: 
@@ -308,11 +322,12 @@ def run_mc(
     plt.show()
 
     
-    fig, ax_err = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    fig, ax_err = plt.subplots(max_int, 1, figsize=(10, 8), sharex=True)
     coord_lbl = [
         r"$|\hat X - X|$ [m]",
         r"$|\hat Y - Y|$ [m]",
-        r"$|\hat\theta - \theta|$ [rad]",
+        r"$|\hat\phi - \phi|$ [rad]",
+        r"$|\hat\psi - \psi|$ [rad]",
     ]
 
     for i, ax_ in enumerate(ax_err):
