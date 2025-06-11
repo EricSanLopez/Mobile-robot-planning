@@ -1,9 +1,10 @@
 import coal
 import numpy as np
 import pinocchio as pin
+from pinocchio.visualize import MeshcatVisualizer
 import meshcat.geometry as mg
 from meshcat.transformations import translation_matrix, rotation_matrix
-
+import time
 
 class dotdict(dict):
     __getattr__ = dict.get
@@ -105,17 +106,95 @@ def show_sample_point(viewer, name, pos, color=[0, 0.6, 1.0, 1.0], radius=0.03):
     viewer[name].set_transform(T)
 
 
-def erase_graph_vis(viewer):
+def erase_sample_points(viewer):
     for i in range(10000):
         try:
-            viewer[f"nodes/{i}"].delete()
-            viewer[f"edges/{i}"].delete()
+            viewer[f"sample_{i}"].delete()
         except:
             pass
-
 
 def show_robot(x, y, theta, viz):
     quat = pin.Quaternion(pin.utils.rotate('z', theta)).coeffs()
     pos = np.array([x,y,0.1])
 
     viz.display(np.append(pos,quat))
+
+# ────────────────────────────────────────────────────────────────
+#  1. show_robot  — now works for 3- or 4-state vectors
+# ────────────────────────────────────────────────────────────────
+def show_robot_(robot: pin.RobotWrapper,
+                viz: MeshcatVisualizer,
+                x: float,
+                y: float,
+                theta: float,
+                phi: float = 0.0):
+    """
+    Display either a differential-drive (x,y,θ) or a bicycle (x,y,θ,φ) pose.
+
+    • (x, y, θ)      – position & chassis heading  
+    • φ (optional)   – steering angle; ignored if the model has no steer_joint
+    """
+    # build a fresh configuration vector --------------------------
+    q = pin.neutral(robot.model).copy()          # length = model.nq
+    # base position & orientation (floating joint = 7 DoF)
+    q[0:3] = [x, y, 0.0]
+    q[3:7] = pin.Quaternion(pin.utils.rotate('z', theta)).coeffs()
+
+    # steering joint, if present ---------------------------------
+    try:
+        idx = robot.model.getJointId("steer_joint") - 1   # −1 → q-index
+        q[idx] = phi
+    except KeyError:
+        pass                                              # diff-drive model
+
+    viz.display(q)
+
+
+# ────────────────────────────────────────────────────────────────
+# 2. simple trajectory player that accepts 3- or 4-state arrays
+# ────────────────────────────────────────────────────────────────
+def sim_trajectory(viz, robot: pin.RobotWrapper, delta_t: float, X: np.ndarray):
+    """
+    Visualise a state trajectory X of shape (N,3) or (N,4).
+    """
+    is_bicycle = X.shape[1] == 4
+    for x in X:
+        if is_bicycle:
+            px, py, th, phi = x
+            show_robot(robot, viz, px, py, th, phi)
+        else:
+            px, py, th = x
+            show_robot(robot, viz, px, py, th)
+        
+        time.sleep(delta_t)
+
+
+# Define robot dynamics
+def discrete_dynamics(state, control_input, dt, model_mismatch=False):
+    """
+    Update the robot's state based on its dynamics.
+
+    Parameters:
+    - state: Current state [x, y, theta]
+    - control_input: Control input [linear_velocity, angular_velocity]
+    - dt: Time step
+
+    Returns:
+    - Updated state [x, y, theta]
+    """
+    x, y, theta = state
+    linear_velocity, angular_velocity = control_input
+    if model_mismatch:
+        # Introduce model mismatch by adding noise to the control input
+        linear_velocity += np.random.normal(0, 1.0)
+        angular_velocity += np.random.normal(0, 1.0)
+
+    # Update state using differential drive kinematics
+    x += linear_velocity * np.cos(theta) * dt
+    y += linear_velocity * np.sin(theta) * dt
+    theta += angular_velocity * dt
+
+    # Normalize theta to keep it within [-pi, pi]
+    theta = np.arctan2(np.sin(theta), np.cos(theta))
+
+    return np.array([x, y, theta])

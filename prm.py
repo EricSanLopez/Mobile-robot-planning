@@ -1,11 +1,13 @@
 import utils
 import coal
 import meshcat.geometry as mg
+import matplotlib.pyplot as plt
 import numpy as np
 import pinocchio as pin
 from meshcat.transformations import translation_matrix, rotation_matrix
 from scipy.spatial.distance import cdist
 from localPlanner import LocalOptimalControlPlanner, DifferentialDriveModel
+import networkx as nx
 import math
 import heapq
 
@@ -36,7 +38,7 @@ class PRM_Graph:
         distances = cdist(self.nodes, [self.nodes[p]]).flatten()
         return np.argsort(distances)[1:k+1]
 
-    def local_path(self, p1, p2, n_intervals=10):
+    def local_path(self, p1, p2, n_intervals=10, t_final=5.0):
         p1 = self.nodes[p1]
         p2 = self.nodes[p2]
         
@@ -48,7 +50,7 @@ class PRM_Graph:
 
         planner = LocalOptimalControlPlanner(
             model = DifferentialDriveModel(),
-            t_final = 5.0,
+            t_final = t_final,
             n_intervals = n_intervals,
             ipopt_options={"ipopt.print_level":0, "print_time":False}
         )
@@ -69,7 +71,7 @@ class PRM_Graph:
         x2, y2 = self.nodes[v]
         return math.hypot(x2 - x1, y2 - y1)
 
-    def dijkstra(self, start, goal):
+    def dijkstra(self, start, goal, return_dist=False):
         np_edges = np.array(self.edges)
         n = len(self.nodes)
         dist = [math.inf] * n
@@ -106,7 +108,35 @@ class PRM_Graph:
                 path.append(int(u))
                 u = prev[u]
             path.reverse()
+            
+        if return_dist:
+            return path, [dist[u] for u in path]
         return path
+
+    def plot_graph(self):
+        nodes = {i:v for i, v in enumerate(self.nodes)}
+        G = nx.Graph()
+        G.add_edges_from(self.edges)
+        
+        # Use actual positions for layout
+        nx.draw(G, pos=nodes, node_color='lightgreen', node_size=50)
+        plt.title("PRM Graph")
+        plt.show()
+
+    def plot_path(self, path):
+        nodes = {i:v for i, v in enumerate(self.nodes)}
+        path_nodes = {i:v for i, v in zip(path, np.array(self.nodes)[path])}
+        path_edges = list(zip(path, path[1:]))
+        
+        G = nx.Graph()
+        G.add_edges_from(self.edges)
+        
+        # Use actual positions for layout
+        nx.draw(G, pos=nodes, node_color='lightgreen', node_size=50)
+        nx.draw_networkx_edges(G, pos=nodes, edgelist=path_edges, edge_color='red', width=2.5)
+        nx.draw_networkx_nodes(G, pos=nodes, nodelist=path, node_color='red', node_size=80)
+        plt.title("Path over PRM Graph")
+        plt.show()
 
     def show_graph(self, vis):
         utils.erase_graph_vis(vis)
